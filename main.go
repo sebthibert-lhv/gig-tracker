@@ -10,6 +10,9 @@ func main() {
 	db := connectDB()
 	defer db.Close()
 
+	rdb := connectRedis()
+	defer rdb.Close()
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /venues", handleCreateVenue(db))
@@ -20,11 +23,11 @@ func main() {
 	mux.HandleFunc("GET /bands", handleListBands(db))
 	mux.HandleFunc("GET /bands/{id}", handleGetBand(db))
 
-	mux.HandleFunc("POST /gigs", handleCreateGig(db))
-	mux.HandleFunc("GET /gigs", handleListGigs(db))
+	mux.HandleFunc("POST /gigs", handleCreateGig(db, rdb))
+	mux.HandleFunc("GET /gigs", handleListGigs(db, rdb))
 	mux.HandleFunc("GET /gigs/{id}", handleGetGig(db))
 
-	mux.HandleFunc("POST /gigs/{id}/photo", handleUploadGigPhoto(db))
+	mux.HandleFunc("POST /gigs/{id}/photo", handleUploadGigPhoto(db, rdb))
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
 
 	log.Println("starting server on :8080")
