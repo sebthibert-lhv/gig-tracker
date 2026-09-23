@@ -3,12 +3,16 @@ package main
 import (
 	"database/sql"
 	"log"
+	"os"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func connectDB() *sql.DB {
-	connStr := "postgres://giguser:gigpass@localhost:5432/gigtracker?sslmode=disable"
+	connStr := os.Getenv("DATABASE_URL")
+	if connStr == "" {
+		connStr = "postgres://giguser:gigpass@localhost:5432/gigtracker?sslmode=disable"
+	}
 
 	db, err := sql.Open("pgx", connStr)
 	if err != nil {

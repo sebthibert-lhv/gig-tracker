@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 )
 
 func main() {
@@ -14,6 +15,8 @@ func main() {
 	defer rdb.Close()
 
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /health", handleHealth)
 
 	mux.HandleFunc("POST /venues", handleCreateVenue(db))
 	mux.HandleFunc("GET /venues", handleListVenues(db))
@@ -30,10 +33,19 @@ func main() {
 	mux.HandleFunc("POST /gigs/{id}/photo", handleUploadGigPhoto(db, rdb))
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
 
-	log.Println("starting server on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("starting server on :%s", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
