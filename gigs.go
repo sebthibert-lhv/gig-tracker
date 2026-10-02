@@ -53,12 +53,36 @@ const gigsListCacheKey = "gigs:list"
 
 func handleCreateGig(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req CreateGigRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+		r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			http.Error(w, "expected a multipart form under 10MB", http.StatusBadRequest)
 			return
 		}
 
+		gigJSON := r.FormValue("gig")
+		if gigJSON == "" {
+			http.Error(w, "missing gig field", http.StatusBadRequest)
+			return
+		}
+
+		var req CreateGigRequest
+		if err := json.Unmarshal([]byte(gigJSON), &req); err != nil {
+			http.Error(w, "gig field is not valid JSON", http.StatusBadRequest)
+			return
+		}
+
+		// photo is optional
+		file, header, err := r.FormFile("photo")
+		hasPhoto := err == nil
+		if err != nil && err != http.ErrMissingFile {
+			http.Error(w, "invalid photo", http.StatusBadRequest)
+			return
+		}
+		if hasPhoto {
+			defer file.Close()
+		}
+
+		// --- unchanged from here: validation and band cleanup ---
 		req.Venue.Name = strings.TrimSpace(req.Venue.Name)
 		req.Venue.City = strings.TrimSpace(req.Venue.City)
 		if req.Venue.Name == "" {
@@ -70,7 +94,6 @@ func handleCreateGig(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 			return
 		}
 
-		// clean up band names and drop duplicates within this request
 		seen := map[string]bool{}
 		var bands []CreateGigBand
 		for _, b := range req.Bands {
@@ -128,8 +151,33 @@ func handleCreateGig(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 			}
 			g.Bands = append(g.Bands, GigBand{BandID: bandID, BandName: storedName, IsHeadliner: b.IsHeadliner})
 		}
+		// --- end unchanged ---
+
+		// photo goes last: everything that can fail in the database has already succeeded
+		var savedPath string
+		if hasPhoto {
+			photoURL, destPath, err := savePhoto(file, header, g.ID)
+			if err != nil {
+				log.Printf("save photo: %v", err)
+				http.Error(w, "failed to save photo", http.StatusInternalServerError)
+				return
+			}
+			savedPath = destPath
+
+			if _, err := tx.Exec(`UPDATE gigs SET photo_url = $1 WHERE id = $2`, photoURL, g.ID); err != nil {
+				os.Remove(savedPath)
+				log.Printf("set photo url: %v", err)
+				http.Error(w, "failed to attach photo", http.StatusInternalServerError)
+				return
+			}
+			g.PhotoURL = photoURL
+		}
 
 		if err := tx.Commit(); err != nil {
+			if savedPath != "" {
+				os.Remove(savedPath)
+			}
+			log.Printf("commit: %v", err)
 			http.Error(w, "failed to commit transaction", http.StatusInternalServerError)
 			return
 		}
