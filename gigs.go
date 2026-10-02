@@ -42,14 +42,14 @@ type GigBand struct {
 
 type Gig struct {
 	ID       int       `json:"id"`
-	VenueID  int       `json:"venue_id"`
+	Venue    Venue     `json:"venue"`
 	Date     string    `json:"date"`
 	Notes    string    `json:"notes"`
 	PhotoURL string    `json:"photo_url"`
 	Bands    []GigBand `json:"bands"`
 }
 
-const gigsListCacheKey = "gigs:list"
+const gigsListCacheKey = "gigs:list:v2"
 
 func handleCreateGig(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -120,17 +120,17 @@ func handleCreateGig(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		venueID, err := findOrCreateVenue(tx, req.Venue.Name, req.Venue.City)
+		venue, err := findOrCreateVenue(tx, req.Venue.Name, req.Venue.City)
 		if err != nil {
 			log.Printf("find or create venue: %v", err)
 			http.Error(w, "failed to save venue", http.StatusInternalServerError)
 			return
 		}
 
-		g := Gig{VenueID: venueID, Date: req.Date, Notes: req.Notes, Bands: []GigBand{}}
+		g := Gig{Venue: venue, Date: req.Date, Notes: req.Notes, Bands: []GigBand{}}
 
 		insertGig := `INSERT INTO gigs (venue_id, date, notes) VALUES ($1, $2, $3) RETURNING id`
-		if err := tx.QueryRow(insertGig, venueID, req.Date, req.Notes).Scan(&g.ID); err != nil {
+		if err := tx.QueryRow(insertGig, venue.ID, req.Date, req.Notes).Scan(&g.ID); err != nil {
 			log.Printf("insert gig: %v", err)
 			http.Error(w, "failed to create gig", http.StatusInternalServerError)
 			return
@@ -205,7 +205,12 @@ func handleListGigs(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 			log.Printf("redis get error: %v", err)
 		}
 
-		gigRows, err := db.Query(`SELECT id, venue_id, date, notes, photo_url FROM gigs ORDER BY date DESC`)
+		gigRows, err := db.Query(`
+			SELECT g.id, g.date::text, g.notes, g.photo_url, v.id, v.name, v.city
+			FROM gigs g
+			JOIN venues v ON v.id = g.venue_id
+			ORDER BY g.date DESC
+`		)
 		if err != nil {
 			http.Error(w, "failed to fetch gigs", http.StatusInternalServerError)
 			return
@@ -216,13 +221,14 @@ func handleListGigs(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 		var order []int
 		for gigRows.Next() {
 			g := &Gig{Bands: []GigBand{}}
-			var notes, photoURL sql.NullString
-			if err := gigRows.Scan(&g.ID, &g.VenueID, &g.Date, &notes, &photoURL); err != nil {
+			var notes, photoURL, venueCity sql.NullString
+			if err := gigRows.Scan(&g.ID, &g.Date, &notes, &photoURL, &g.Venue.ID, &g.Venue.Name, &venueCity); err != nil {
 				http.Error(w, "failed to read gig row", http.StatusInternalServerError)
 				return
 			}
 			g.Notes = notes.String
 			g.PhotoURL = photoURL.String
+			g.Venue.City = venueCity.String
 			gigsByID[g.ID] = g
 			order = append(order, g.ID)
 		}
@@ -281,10 +287,14 @@ func handleGetGig(db *sql.DB) http.HandlerFunc {
 		}
 
 		g := &Gig{Bands: []GigBand{}}
-		var notes, photoURL sql.NullString
+		var notes, photoURL, venueCity sql.NullString
 
-		query := `SELECT id, venue_id, date, notes, photo_url FROM gigs WHERE id = $1`
-		err = db.QueryRow(query, id).Scan(&g.ID, &g.VenueID, &g.Date, &notes, &photoURL)
+		query := `
+			SELECT g.id, g.date::text, g.notes, g.photo_url, v.id, v.name, v.city
+			FROM gigs g
+			JOIN venues v ON v.id = g.venue_id
+			WHERE g.id = $1`
+		err = db.QueryRow(query, id).Scan(&g.ID, &g.Date, &notes, &photoURL, &g.Venue.ID, &g.Venue.Name, &venueCity)
 		if err == sql.ErrNoRows {
 			http.Error(w, "gig not found", http.StatusNotFound)
 			return
@@ -294,6 +304,7 @@ func handleGetGig(db *sql.DB) http.HandlerFunc {
 		}
 		g.Notes = notes.String
 		g.PhotoURL = photoURL.String
+		g.Venue.City = venueCity.String
 
 		bandRows, err := db.Query(`
 			SELECT b.id, b.name, gb.is_headliner

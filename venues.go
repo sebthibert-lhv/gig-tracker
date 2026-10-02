@@ -13,19 +13,21 @@ type Venue struct {
 	City string `json:"city"`
 }
 
-func findOrCreateVenue(tx *sql.Tx, name, city string) (int, error) {
+func findOrCreateVenue(tx *sql.Tx, name, city string) (Venue, error) {
 	var cityArg any
 	if city != "" {
 		cityArg = city
 	}
 
-	var id int
+	var v Venue
+	var storedCity sql.NullString
 	query := `
 		INSERT INTO venues (name, city) VALUES ($1, $2)
 		ON CONFLICT ((lower(name)), (lower(coalesce(city, '')))) DO UPDATE SET name = venues.name
-		RETURNING id`
-	err := tx.QueryRow(query, name, cityArg).Scan(&id)
-	return id, err
+		RETURNING id, name, city`
+	err := tx.QueryRow(query, name, cityArg).Scan(&v.ID, &v.Name, &storedCity)
+	v.City = storedCity.String
+	return v, err
 }
 
 func handleCreateVenue(db *sql.DB) http.HandlerFunc {
@@ -59,10 +61,12 @@ func handleListVenues(db *sql.DB) http.HandlerFunc {
 		venues := []Venue{}
 		for rows.Next() {
 			var v Venue
-			if err := rows.Scan(&v.ID, &v.Name, &v.City); err != nil {
+			var city sql.NullString
+			if err := rows.Scan(&v.ID, &v.Name, &city); err != nil {
 				http.Error(w, "failed to read venue row", http.StatusInternalServerError)
 				return
 			}
+			v.City = city.String
 			venues = append(venues, v)
 		}
 
@@ -79,8 +83,9 @@ func handleGetVenue(db *sql.DB) http.HandlerFunc {
 		}
 
 		var v Venue
+		var city sql.NullString
 		query := `SELECT id, name, city FROM venues WHERE id = $1`
-		err = db.QueryRow(query, id).Scan(&v.ID, &v.Name, &v.City)
+		err = db.QueryRow(query, id).Scan(&v.ID, &v.Name, &city)
 		if err == sql.ErrNoRows {
 			http.Error(w, "venue not found", http.StatusNotFound)
 			return
@@ -88,6 +93,7 @@ func handleGetVenue(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "failed to fetch venue", http.StatusInternalServerError)
 			return
 		}
+		v.City = city.String
 
 		writeJSON(w, http.StatusOK, v)
 	}
