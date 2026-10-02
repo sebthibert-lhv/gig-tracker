@@ -10,10 +10,28 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
+
+type CreateGigBand struct {
+	Name        string `json:"name"`
+	IsHeadliner bool   `json:"is_headliner"`
+}
+
+type CreateGigVenue struct {
+	Name string `json:"name"`
+	City string `json:"city"`
+}
+
+type CreateGigRequest struct {
+	Venue CreateGigVenue  `json:"venue"`
+	Date  string          `json:"date"`
+	Notes string          `json:"notes"`
+	Bands []CreateGigBand `json:"bands"`
+}
 
 type GigBand struct {
 	BandID      int    `json:"band_id"`
@@ -34,12 +52,39 @@ const gigsListCacheKey = "gigs:list"
 
 func handleCreateGig(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var g Gig
-		if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
+		var req CreateGigRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if len(g.Bands) == 0 {
+
+		req.Venue.Name = strings.TrimSpace(req.Venue.Name)
+		req.Venue.City = strings.TrimSpace(req.Venue.City)
+		if req.Venue.Name == "" {
+			http.Error(w, "venue name is required", http.StatusBadRequest)
+			return
+		}
+		if req.Date == "" {
+			http.Error(w, "date is required", http.StatusBadRequest)
+			return
+		}
+
+		// clean up band names and drop duplicates within this request
+		seen := map[string]bool{}
+		var bands []CreateGigBand
+		for _, b := range req.Bands {
+			name := strings.TrimSpace(b.Name)
+			if name == "" {
+				continue
+			}
+			key := strings.ToLower(name)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			bands = append(bands, CreateGigBand{Name: name, IsHeadliner: b.IsHeadliner})
+		}
+		if len(bands) == 0 {
 			http.Error(w, "a gig must have at least one band", http.StatusBadRequest)
 			return
 		}
@@ -49,20 +94,38 @@ func handleCreateGig(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 			http.Error(w, "failed to start transaction", http.StatusInternalServerError)
 			return
 		}
-		defer tx.Rollback() // no-op if Commit() already succeeded
+		defer tx.Rollback()
+
+		venueID, err := findOrCreateVenue(tx, req.Venue.Name, req.Venue.City)
+		if err != nil {
+			log.Printf("find or create venue: %v", err)
+			http.Error(w, "failed to save venue", http.StatusInternalServerError)
+			return
+		}
+
+		g := Gig{VenueID: venueID, Date: req.Date, Notes: req.Notes, Bands: []GigBand{}}
 
 		insertGig := `INSERT INTO gigs (venue_id, date, notes) VALUES ($1, $2, $3) RETURNING id`
-		if err := tx.QueryRow(insertGig, g.VenueID, g.Date, g.Notes).Scan(&g.ID); err != nil {
+		if err := tx.QueryRow(insertGig, venueID, req.Date, req.Notes).Scan(&g.ID); err != nil {
+			log.Printf("insert gig: %v", err)
 			http.Error(w, "failed to create gig", http.StatusInternalServerError)
 			return
 		}
 
 		insertGigBand := `INSERT INTO gig_bands (gig_id, band_id, is_headliner) VALUES ($1, $2, $3)`
-		for _, gb := range g.Bands {
-			if _, err := tx.Exec(insertGigBand, g.ID, gb.BandID, gb.IsHeadliner); err != nil {
+		for _, b := range bands {
+			bandID, storedName, err := findOrCreateBand(tx, b.Name)
+			if err != nil {
+				log.Printf("find or create band %q: %v", b.Name, err)
+				http.Error(w, "failed to save band", http.StatusInternalServerError)
+				return
+			}
+			if _, err := tx.Exec(insertGigBand, g.ID, bandID, b.IsHeadliner); err != nil {
+				log.Printf("attach band to gig: %v", err)
 				http.Error(w, "failed to attach band to gig", http.StatusInternalServerError)
 				return
 			}
+			g.Bands = append(g.Bands, GigBand{BandID: bandID, BandName: storedName, IsHeadliner: b.IsHeadliner})
 		}
 
 		if err := tx.Commit(); err != nil {

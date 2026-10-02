@@ -26,3 +26,7 @@ CREATE TABLE gig_bands (
     is_headliner BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (gig_id, band_id)
 );
+
+CREATE UNIQUE INDEX bands_name_unique ON bands (lower(name));
+
+CREATE UNIQUE INDEX venues_name_city_unique ON venues (lower(name), lower(coalesce(city, '')));

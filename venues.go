@@ -13,6 +13,21 @@ type Venue struct {
 	City string `json:"city"`
 }
 
+func findOrCreateVenue(tx *sql.Tx, name, city string) (int, error) {
+	var cityArg any
+	if city != "" {
+		cityArg = city
+	}
+
+	var id int
+	query := `
+		INSERT INTO venues (name, city) VALUES ($1, $2)
+		ON CONFLICT ((lower(name)), (lower(coalesce(city, '')))) DO UPDATE SET name = venues.name
+		RETURNING id`
+	err := tx.QueryRow(query, name, cityArg).Scan(&id)
+	return id, err
+}
+
 func handleCreateVenue(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var v Venue

@@ -12,6 +12,17 @@ type Band struct {
 	Name string `json:"name"`
 }
 
+func findOrCreateBand(tx *sql.Tx, name string) (int, string, error) {
+	var id int
+	var storedName string
+	query := `
+		INSERT INTO bands (name) VALUES ($1)
+		ON CONFLICT ((lower(name))) DO UPDATE SET name = bands.name
+		RETURNING id, name`
+	err := tx.QueryRow(query, name).Scan(&id, &storedName)
+	return id, storedName, err
+}
+
 func handleCreateBand(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var b Band
