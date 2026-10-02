@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -279,7 +280,6 @@ func handleUploadGigPhoto(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 			return
 		}
 
-		// 10 MB max upload size
 		if err := r.ParseMultipartForm(10 << 20); err != nil {
 			http.Error(w, "file too large or invalid form", http.StatusBadRequest)
 			return
@@ -292,31 +292,23 @@ func handleUploadGigPhoto(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 		}
 		defer file.Close()
 
-		ext := filepath.Ext(header.Filename)
-		filename := fmt.Sprintf("%d%s", id, ext)
-		destPath := filepath.Join("uploads", filename)
-
-		if err := os.MkdirAll("uploads", 0755); err != nil {
-			http.Error(w, "failed to prepare storage", http.StatusInternalServerError)
-			return
-		}
-
-		dst, err := os.Create(destPath)
+		photoURL, destPath, err := savePhoto(file, header, id)
 		if err != nil {
-			http.Error(w, "failed to save file", http.StatusInternalServerError)
-			return
-		}
-		defer dst.Close()
-
-		if _, err := io.Copy(dst, file); err != nil {
-			http.Error(w, "failed to write file", http.StatusInternalServerError)
+			log.Printf("save photo: %v", err)
+			http.Error(w, "failed to save photo", http.StatusInternalServerError)
 			return
 		}
 
-		photoURL := "/" + destPath
-		_, err = db.Exec(`UPDATE gigs SET photo_url = $1 WHERE id = $2`, photoURL, id)
+		result, err := db.Exec(`UPDATE gigs SET photo_url = $1 WHERE id = $2`, photoURL, id)
 		if err != nil {
+			os.Remove(destPath)
+			log.Printf("update gig photo: %v", err)
 			http.Error(w, "failed to update gig", http.StatusInternalServerError)
+			return
+		}
+		if rows, _ := result.RowsAffected(); rows == 0 {
+			os.Remove(destPath)
+			http.Error(w, "gig not found", http.StatusNotFound)
 			return
 		}
 
@@ -326,4 +318,28 @@ func handleUploadGigPhoto(db *sql.DB, rdb *redis.Client) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, map[string]string{"photo_url": photoURL})
 	}
+}
+
+// savePhoto writes an uploaded photo to disk, named after the gig.
+// It returns the public URL and the file path on disk (needed for cleanup).
+func savePhoto(file multipart.File, header *multipart.FileHeader, gigID int) (string, string, error) {
+	if err := os.MkdirAll("uploads", 0755); err != nil {
+		return "", "", fmt.Errorf("create uploads dir: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	destPath := filepath.Join("uploads", fmt.Sprintf("%d%s", gigID, ext))
+
+	dst, err := os.Create(destPath)
+	if err != nil {
+		return "", "", fmt.Errorf("create file: %w", err)
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, file); err != nil {
+		os.Remove(destPath)
+		return "", "", fmt.Errorf("write file: %w", err)
+	}
+
+	return "/" + destPath, destPath, nil
 }
